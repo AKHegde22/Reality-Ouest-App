@@ -1,0 +1,16 @@
+{
+  "expo": {
+    "name": "Reality RPG",
+    "slug": "reality-rpg",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "assetBundlePatterns": [
+      "**/*"
+    ],
+    "ios": {
+      "supportsTablet": true
+    },
+    "android": {},
+    "web": {}
+  }
+}
