@@ -48,6 +48,14 @@ const defaultPlayerState: PlayerState = {
   },
 };
 
+const toUserMessage = (error: unknown, fallback: string): string => {
+  if (!(error instanceof Error)) {
+    return fallback;
+  }
+  const normalized = error.message.trim();
+  return normalized ? normalized : fallback;
+};
+
 interface UseGameState {
   ready: boolean;
   player: PlayerState;
@@ -140,11 +148,18 @@ export const useGameState = (): UseGameState => {
   const guildDamageTotal = useMemo(() => totalHeroRaidDamage(guild), [guild]);
 
   const setHeroClass = (className: HeroClass): void => {
+    if (player.className === className) {
+      return;
+    }
     setPlayer((prev) => ({ ...prev, className }));
     setDialogue(`Class changed to ${className}. Matching quests now grant bonus XP.`);
   };
 
   const startGuildRaid = (): void => {
+    if (guild.activeRaid) {
+      setDialogue(`Raid already active: ${guild.activeRaid.bossName}.`);
+      return;
+    }
     setGuild((prev) => {
       const next = startRaid(prev);
       return next;
@@ -183,8 +198,10 @@ export const useGameState = (): UseGameState => {
       setDialogue(
         result.source === "cerebras"
           ? result.narration
-          : `${result.narration} Cloud vision unavailable, running local fallback.`,
+          : `${result.narration} Cerebras unavailable, running local fallback.`,
       );
+    } catch (error) {
+      setDialogue(toUserMessage(error, "Scan failed. Please try another photo."));
     } finally {
       setBusyLabel(null);
     }
@@ -253,6 +270,8 @@ export const useGameState = (): UseGameState => {
       setAfterImageState(null);
       setScanResult(null);
       setActiveQuest(null);
+    } catch (error) {
+      setDialogue(toUserMessage(error, "Verification failed. Please try another after photo."));
     } finally {
       setBusyLabel(null);
     }

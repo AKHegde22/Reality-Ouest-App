@@ -146,7 +146,7 @@ export default function App(): JSX.Element {
           <Text style={styles.nextLevelText}>Class: {player.className}</Text>
           <Text style={styles.nextLevelText}>Story chapter: {player.chapter}</Text>
           <Text style={styles.nextLevelText}>Quests completed: {player.questsCompleted}</Text>
-          <View style={styles.buttonRow}>
+          <View style={styles.classRow}>
             {HERO_CLASSES.map((className) => (
               <PrimaryButton
                 key={className}
@@ -338,6 +338,9 @@ export default function App(): JSX.Element {
               onChangeText={setGuildNameDraft}
               placeholder="Guild name"
               placeholderTextColor={colors.textSecondary}
+              autoCapitalize="words"
+              autoCorrect={false}
+              maxLength={50}
               style={styles.guildInput}
             />
             <PrimaryButton
@@ -347,7 +350,7 @@ export default function App(): JSX.Element {
               }}
               variant="muted"
               style={styles.guildSaveButton}
-              disabled={isBusy}
+              disabled={isBusy || guildNameDraft.trim() === guild.guildName}
             />
           </View>
           {guild.activeRaid ? (
@@ -530,6 +533,11 @@ const styles = StyleSheet.create({
   },
   buttonRow: {
     flexDirection: "row",
+    gap: 8,
+  },
+  classRow: {
+    flexDirection: "row",
+    flexWrap: "wrap",
     gap: 8,
   },
   buttonColumn: {

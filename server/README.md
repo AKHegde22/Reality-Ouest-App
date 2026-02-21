@@ -14,6 +14,7 @@ Current implementation feeds compact image fingerprint descriptors to Cerebras a
 - `CEREBRAS_MODEL` (default: `gpt-oss-120b`)
 - `CEREBRAS_API_BASE_URL` (default: `https://api.cerebras.ai/v1`)
 - `PORT` (default: `8787`)
+- `HOST` (default: `0.0.0.0`)
 - `CORS_ORIGIN` (default: `*`)
 
 ## Run
@@ -23,3 +24,5 @@ npm run server:start
 ```
 
 The server reads `.env` from the project root automatically.
+
+Error responses include a `requestId` field for tracing.

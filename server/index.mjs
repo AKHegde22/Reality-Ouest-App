@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import http from "node:http";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 
 const loadDotEnv = () => {
   const envPath = path.join(process.cwd(), ".env");
@@ -15,10 +16,12 @@ const loadDotEnv = () => {
     if (!trimmed || trimmed.startsWith("#")) {
       continue;
     }
+
     const separator = trimmed.indexOf("=");
     if (separator <= 0) {
       continue;
     }
+
     const key = trimmed.slice(0, separator).trim();
     const rawValue = trimmed.slice(separator + 1).trim();
     const value =
@@ -26,6 +29,7 @@ const loadDotEnv = () => {
       (rawValue.startsWith("'") && rawValue.endsWith("'"))
         ? rawValue.slice(1, -1)
         : rawValue;
+
     if (key && process.env[key] === undefined) {
       process.env[key] = value;
     }
@@ -34,7 +38,13 @@ const loadDotEnv = () => {
 
 loadDotEnv();
 
-const PORT = Number(process.env.PORT ?? 8787);
+const toInt = (value, fallback) => {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? Math.floor(parsed) : fallback;
+};
+
+const PORT = toInt(process.env.PORT, 8787);
+const HOST = process.env.HOST || "0.0.0.0";
 const CEREBRAS_API_KEY = process.env.CEREBRAS_API_KEY ?? "";
 const CEREBRAS_MODEL = process.env.CEREBRAS_MODEL ?? "gpt-oss-120b";
 const CEREBRAS_API_BASE_URL = (process.env.CEREBRAS_API_BASE_URL ?? "https://api.cerebras.ai/v1").replace(
@@ -42,8 +52,9 @@ const CEREBRAS_API_BASE_URL = (process.env.CEREBRAS_API_BASE_URL ?? "https://api
   "",
 );
 const CORS_ORIGIN = process.env.CORS_ORIGIN ?? "*";
-const REQUEST_TIMEOUT_MS = Number(process.env.CEREBRAS_REQUEST_TIMEOUT_MS ?? 18000);
+const REQUEST_TIMEOUT_MS = toInt(process.env.CEREBRAS_REQUEST_TIMEOUT_MS, 18000);
 const MAX_BODY_SIZE_BYTES = 12 * 1024 * 1024;
+const MAX_IMAGE_BASE64_CHARS = 10 * 1024 * 1024;
 
 const QUEST_SCHEMA = {
   type: "object",
@@ -175,11 +186,20 @@ const sendJson = (response, statusCode, payload) => {
     "Content-Type": "application/json; charset=utf-8",
     "Content-Length": Buffer.byteLength(body),
     "Access-Control-Allow-Origin": CORS_ORIGIN,
-    "Access-Control-Allow-Headers": "Content-Type, Authorization",
+    "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Request-Id",
     "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
   });
   response.end(body);
 };
+
+const sendError = (response, statusCode, requestId, message) => {
+  sendJson(response, statusCode, {
+    error: message,
+    requestId,
+  });
+};
+
+class BadRequestError extends Error {}
 
 const readJsonBody = async (request) =>
   new Promise((resolve, reject) => {
@@ -190,7 +210,7 @@ const readJsonBody = async (request) =>
     request.on("data", (chunk) => {
       size += Buffer.byteLength(chunk);
       if (size > MAX_BODY_SIZE_BYTES) {
-        reject(new Error("Request body too large."));
+        reject(new BadRequestError("Request body too large."));
         request.destroy();
         return;
       }
@@ -202,16 +222,53 @@ const readJsonBody = async (request) =>
         return;
       }
       try {
-        resolve(JSON.parse(raw));
+        const parsed = JSON.parse(raw);
+        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+          reject(new BadRequestError("JSON body must be an object."));
+          return;
+        }
+        resolve(parsed);
       } catch {
-        reject(new Error("Invalid JSON body."));
+        reject(new BadRequestError("Invalid JSON body."));
       }
     });
     request.on("error", reject);
   });
 
-const normalizeBase64 = (value) => value.replace(/^data:[^;]+;base64,/, "").trim();
+const normalizeBase64 = (value) => value.replace(/^data:[^;]+;base64,/, "").replace(/\s+/g, "").trim();
 const clamp = (value, min, max) => Math.min(Math.max(value, min), max);
+
+const validateAndNormalizeBase64 = (value, fieldName) => {
+  if (typeof value !== "string" || !value.trim()) {
+    throw new BadRequestError(`${fieldName} is required.`);
+  }
+
+  const normalized = normalizeBase64(value);
+  if (!normalized || normalized.length < 64) {
+    throw new BadRequestError(`${fieldName} is too small to be a valid image payload.`);
+  }
+  if (normalized.length > MAX_IMAGE_BASE64_CHARS) {
+    throw new BadRequestError(`${fieldName} exceeds max size limit.`);
+  }
+  if (!/^[A-Za-z0-9+/=]+$/.test(normalized)) {
+    throw new BadRequestError(`${fieldName} contains invalid base64 characters.`);
+  }
+  return normalized;
+};
+
+const decodeBase64 = (normalizedBase64, fieldName) => {
+  const buffer = Buffer.from(normalizedBase64, "base64");
+  if (!buffer.length) {
+    throw new BadRequestError(`${fieldName} is empty after base64 decoding.`);
+  }
+
+  const canonicalInput = normalizedBase64.replace(/=+$/, "");
+  const canonicalDecoded = buffer.toString("base64").replace(/=+$/, "");
+  if (canonicalDecoded !== canonicalInput) {
+    throw new BadRequestError(`${fieldName} is not valid base64-encoded image content.`);
+  }
+  return buffer;
+};
 
 const extractMessageText = (completionJson) => {
   const content = completionJson?.choices?.[0]?.message?.content;
@@ -227,52 +284,94 @@ const extractMessageText = (completionJson) => {
   return "";
 };
 
-const requestCerebrasJson = async ({ system, user, schemaName, schema }) => {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+const parseJsonObject = (rawText) => {
+  const trimmed = rawText.trim();
+  if (!trimmed) {
+    throw new Error("Model returned empty output.");
+  }
 
   try {
-    const response = await fetch(`${CEREBRAS_API_BASE_URL}/chat/completions`, {
+    return JSON.parse(trimmed);
+  } catch {
+    const match = trimmed.match(/\{[\s\S]*\}$/);
+    if (!match) {
+      throw new Error("Model output was not valid JSON.");
+    }
+    return JSON.parse(match[0]);
+  }
+};
+
+const postCerebras = async (payload) => {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  try {
+    return await fetch(`${CEREBRAS_API_BASE_URL}/chat/completions`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         Authorization: `Bearer ${CEREBRAS_API_KEY}`,
       },
-      body: JSON.stringify({
-        model: CEREBRAS_MODEL,
-        temperature: 0.2,
-        max_completion_tokens: 700,
-        messages: [
-          { role: "system", content: system },
-          { role: "user", content: user },
-        ],
-        response_format: {
-          type: "json_schema",
-          json_schema: {
-            name: schemaName,
-            strict: true,
-            schema,
-          },
-        },
-      }),
+      body: JSON.stringify(payload),
       signal: controller.signal,
     });
-
-    if (!response.ok) {
-      const details = await response.text();
-      throw new Error(`Cerebras request failed (${response.status}): ${details}`);
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") {
+      throw new Error(`Cerebras request timed out after ${REQUEST_TIMEOUT_MS}ms.`);
     }
-
-    const responseJson = await response.json();
-    const outputText = extractMessageText(responseJson);
-    if (!outputText.trim()) {
-      throw new Error("Cerebras response did not include parseable output.");
-    }
-
-    return JSON.parse(outputText);
+    throw error;
   } finally {
     clearTimeout(timeout);
   }
+};
+
+const requestCerebrasJson = async ({ system, user, schemaName, schema }) => {
+  const basePayload = {
+    model: CEREBRAS_MODEL,
+    temperature: 0.2,
+    max_completion_tokens: 700,
+    messages: [
+      { role: "system", content: system },
+      { role: "user", content: user },
+    ],
+  };
+
+  const schemaPayload = {
+    ...basePayload,
+    response_format: {
+      type: "json_schema",
+      json_schema: {
+        name: schemaName,
+        strict: true,
+        schema,
+      },
+    },
+  };
+
+  const schemaResponse = await postCerebras(schemaPayload);
+  if (schemaResponse.ok) {
+    const responseJson = await schemaResponse.json();
+    return parseJsonObject(extractMessageText(responseJson));
+  }
+
+  const schemaErrorBody = await schemaResponse.text();
+  if (schemaResponse.status !== 400 && schemaResponse.status !== 422) {
+    throw new Error(`Cerebras request failed (${schemaResponse.status}): ${schemaErrorBody}`);
+  }
+
+  const fallbackPayload = {
+    ...basePayload,
+    response_format: { type: "json_object" },
+  };
+  const fallbackResponse = await postCerebras(fallbackPayload);
+  if (!fallbackResponse.ok) {
+    const fallbackErrorBody = await fallbackResponse.text();
+    throw new Error(
+      `Cerebras request failed (${fallbackResponse.status}): ${fallbackErrorBody || schemaErrorBody}`,
+    );
+  }
+
+  const fallbackJson = await fallbackResponse.json();
+  return parseJsonObject(extractMessageText(fallbackJson));
 };
 
 const hashString = (value) => {
@@ -296,12 +395,9 @@ const sampleBuffer = (buffer, maxSamples = 4096) => {
   return sampled;
 };
 
-const imageDescriptor = (base64Payload) => {
-  const normalized = normalizeBase64(base64Payload);
-  const buffer = Buffer.from(normalized, "base64");
-  if (buffer.length === 0) {
-    throw new Error("Image payload is empty or invalid base64.");
-  }
+const imageDescriptor = (rawBase64, fieldName) => {
+  const normalized = validateAndNormalizeBase64(rawBase64, fieldName);
+  const buffer = decodeBase64(normalized, fieldName);
   const sample = sampleBuffer(buffer, 4096);
   const buckets = new Array(16).fill(0);
   let sum = 0;
@@ -403,36 +499,21 @@ const sanitizeQuest = (quest, fallback, index) => ({
   confidence: clamp(Number(quest?.confidence || fallback.confidence), 0, 1),
 });
 
-const ensureCerebrasConfigured = (response) => {
+const ensureCerebrasConfigured = (response, requestId) => {
   if (CEREBRAS_API_KEY) {
     return true;
   }
-  sendJson(response, 503, {
-    error: "CEREBRAS_API_KEY is missing. Set the server environment variable and retry.",
-  });
+  sendError(response, 503, requestId, "CEREBRAS_API_KEY is missing. Set the env var and retry.");
   return false;
 };
 
-const handleScan = async (request, response) => {
-  if (!ensureCerebrasConfigured(response)) {
+const handleScan = async (request, response, requestId) => {
+  if (!ensureCerebrasConfigured(response, requestId)) {
     return;
   }
 
   const body = await readJsonBody(request);
-  if (typeof body.beforeImageBase64 !== "string" || !body.beforeImageBase64.trim()) {
-    sendJson(response, 400, { error: "beforeImageBase64 is required." });
-    return;
-  }
-
-  let descriptor;
-  try {
-    descriptor = imageDescriptor(body.beforeImageBase64);
-  } catch (error) {
-    sendJson(response, 400, {
-      error: error instanceof Error ? error.message : "Invalid beforeImageBase64 payload.",
-    });
-    return;
-  }
+  const descriptor = imageDescriptor(body.beforeImageBase64, "beforeImageBase64");
   const candidates = selectCandidateQuests(descriptor);
 
   const parsed = await requestCerebrasJson({
@@ -473,32 +554,14 @@ const handleScan = async (request, response) => {
   });
 };
 
-const handleVerify = async (request, response) => {
-  if (!ensureCerebrasConfigured(response)) {
+const handleVerify = async (request, response, requestId) => {
+  if (!ensureCerebrasConfigured(response, requestId)) {
     return;
   }
 
   const body = await readJsonBody(request);
-  if (typeof body.beforeImageBase64 !== "string" || !body.beforeImageBase64.trim()) {
-    sendJson(response, 400, { error: "beforeImageBase64 is required." });
-    return;
-  }
-  if (typeof body.afterImageBase64 !== "string" || !body.afterImageBase64.trim()) {
-    sendJson(response, 400, { error: "afterImageBase64 is required." });
-    return;
-  }
-
-  let beforeDescriptor;
-  let afterDescriptor;
-  try {
-    beforeDescriptor = imageDescriptor(body.beforeImageBase64);
-    afterDescriptor = imageDescriptor(body.afterImageBase64);
-  } catch (error) {
-    sendJson(response, 400, {
-      error: error instanceof Error ? error.message : "Invalid image payload.",
-    });
-    return;
-  }
+  const beforeDescriptor = imageDescriptor(body.beforeImageBase64, "beforeImageBase64");
+  const afterDescriptor = imageDescriptor(body.afterImageBase64, "afterImageBase64");
   const diff = compareDescriptors(beforeDescriptor, afterDescriptor);
 
   if (diff.identical) {
@@ -545,49 +608,85 @@ const handleVerify = async (request, response) => {
   });
 };
 
-const server = http.createServer(async (request, response) => {
-  try {
-    const method = request.method ?? "GET";
-    const url = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`);
-
-    if (method === "OPTIONS") {
-      response.writeHead(204, {
-        "Access-Control-Allow-Origin": CORS_ORIGIN,
-        "Access-Control-Allow-Headers": "Content-Type, Authorization",
-        "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
-      });
-      response.end();
-      return;
-    }
-
-    if (method === "GET" && url.pathname === "/health") {
-      sendJson(response, 200, {
-        ok: true,
-        provider: "cerebras",
-        model: CEREBRAS_MODEL,
-        cerebrasConfigured: Boolean(CEREBRAS_API_KEY),
-      });
-      return;
-    }
-
-    if (method === "POST" && url.pathname === "/api/v1/scan") {
-      await handleScan(request, response);
-      return;
-    }
-
-    if (method === "POST" && url.pathname === "/api/v1/verify") {
-      await handleVerify(request, response);
-      return;
-    }
-
-    sendJson(response, 404, { error: "Route not found." });
-  } catch (error) {
-    sendJson(response, 500, {
-      error: error instanceof Error ? error.message : "Unexpected server error.",
-    });
+const createRequestId = () => {
+  if (typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
   }
-});
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+};
 
-server.listen(PORT, () => {
-  console.log(`[reality-api] listening on http://localhost:${PORT}`);
-});
+const createServer = () =>
+  http.createServer(async (request, response) => {
+    const requestId = createRequestId();
+    response.setHeader("X-Request-Id", requestId);
+
+    try {
+      const method = request.method ?? "GET";
+      const url = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`);
+
+      if (method === "OPTIONS") {
+        response.writeHead(204, {
+          "Access-Control-Allow-Origin": CORS_ORIGIN,
+          "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Request-Id",
+          "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
+          "X-Request-Id": requestId,
+        });
+        response.end();
+        return;
+      }
+
+      if (method === "GET" && url.pathname === "/health") {
+        sendJson(response, 200, {
+          ok: true,
+          provider: "cerebras",
+          model: CEREBRAS_MODEL,
+          cerebrasConfigured: Boolean(CEREBRAS_API_KEY),
+          requestTimeoutMs: REQUEST_TIMEOUT_MS,
+        });
+        return;
+      }
+
+      if (method === "POST" && url.pathname === "/api/v1/scan") {
+        await handleScan(request, response, requestId);
+        return;
+      }
+
+      if (method === "POST" && url.pathname === "/api/v1/verify") {
+        await handleVerify(request, response, requestId);
+        return;
+      }
+
+      sendError(response, 404, requestId, "Route not found.");
+    } catch (error) {
+      if (error instanceof BadRequestError) {
+        sendError(response, 400, requestId, error.message);
+        return;
+      }
+      const message = error instanceof Error ? error.message : "Unexpected server error.";
+      sendError(response, 500, requestId, message);
+    }
+  });
+
+const startServer = () => {
+  const server = createServer();
+  server.listen(PORT, HOST, () => {
+    console.log(`[reality-api] listening on http://${HOST}:${PORT}`);
+  });
+  return server;
+};
+
+const isExecutedDirectly =
+  Boolean(process.argv[1]) && import.meta.url === pathToFileURL(process.argv[1]).href;
+
+if (isExecutedDirectly) {
+  const server = startServer();
+  const shutdown = () => {
+    server.close(() => {
+      process.exit(0);
+    });
+  };
+  process.on("SIGINT", shutdown);
+  process.on("SIGTERM", shutdown);
+}
+
+export { createServer, startServer };

@@ -1,7 +1,9 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import { GuildRaid, GuildState } from "../types/game";
+import { GuildRaid, GuildState, RaidContribution, RaidStatus } from "../types/game";
 
 const GUILD_STATE_KEY = "@reality-rpg/guild-state";
+const MAX_RAID_HISTORY = 15;
+const MAX_CONTRIBUTIONS_PER_RAID = 250;
 
 const hashString = (value: string): number => {
   let hash = 0;
@@ -10,6 +12,97 @@ const hashString = (value: string): number => {
     hash |= 0;
   }
   return Math.abs(hash);
+};
+
+const sanitizeText = (value: unknown, fallback: string, maxLength = 64): string =>
+  typeof value === "string" && value.trim() ? value.trim().slice(0, maxLength) : fallback;
+
+const clampInt = (value: unknown, fallback: number, min = 0, max = Number.MAX_SAFE_INTEGER): number => {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    return fallback;
+  }
+  return Math.min(Math.max(Math.round(parsed), min), max);
+};
+
+const sanitizeContribution = (value: unknown): RaidContribution | null => {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  const contribution = value as Partial<RaidContribution>;
+  return {
+    memberId: sanitizeText(contribution.memberId, "unknown-member", 40),
+    memberName: sanitizeText(contribution.memberName, "Unknown", 40),
+    damage: clampInt(contribution.damage, 0, 0, 2000),
+    at: clampInt(contribution.at, Date.now(), 0),
+  };
+};
+
+const sanitizeRaidStatus = (value: unknown): RaidStatus => (value === "completed" ? "completed" : "active");
+
+const sanitizeRaid = (value: unknown): GuildRaid | null => {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+
+  const raid = value as Partial<GuildRaid>;
+  const maxHp = clampInt(raid.maxHp, 400, 1, 5000);
+  const currentHp = clampInt(raid.currentHp, maxHp, 0, maxHp);
+  const status = sanitizeRaidStatus(raid.status);
+  const contributions = Array.isArray(raid.contributions)
+    ? raid.contributions
+        .map(sanitizeContribution)
+        .filter((entry): entry is RaidContribution => Boolean(entry))
+        .slice(0, MAX_CONTRIBUTIONS_PER_RAID)
+    : [];
+
+  return {
+    id: sanitizeText(raid.id, `raid-${Date.now()}`, 60),
+    title: sanitizeText(raid.title, "Untitled Raid", 80),
+    bossName: sanitizeText(raid.bossName, "Chaos Overlord", 60),
+    maxHp,
+    currentHp,
+    status: currentHp === 0 ? "completed" : status,
+    contributions,
+    createdAt: clampInt(raid.createdAt, Date.now(), 0),
+    completedAt: raid.completedAt ? clampInt(raid.completedAt, Date.now(), 0) : undefined,
+  };
+};
+
+const normalizeGuildState = (value: unknown): GuildState | null => {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  const guild = value as Partial<GuildState>;
+  if (!guild.guildId || !guild.heroId) {
+    return null;
+  }
+
+  const activeRaid = sanitizeRaid(guild.activeRaid);
+  let raidHistory = Array.isArray(guild.raidHistory)
+    ? guild.raidHistory
+        .map(sanitizeRaid)
+        .filter((raid): raid is GuildRaid => Boolean(raid))
+        .slice(0, MAX_RAID_HISTORY)
+    : [];
+
+  let normalizedActiveRaid: GuildRaid | null = null;
+  if (activeRaid) {
+    if (activeRaid.status === "active" && activeRaid.currentHp > 0) {
+      normalizedActiveRaid = activeRaid;
+    } else {
+      raidHistory = [activeRaid, ...raidHistory].slice(0, MAX_RAID_HISTORY);
+    }
+  }
+
+  return {
+    guildId: sanitizeText(guild.guildId, `guild-${Date.now()}`, 60),
+    guildName: sanitizeText(guild.guildName, "Starter Guild", 50),
+    heroId: sanitizeText(guild.heroId, "hero-1", 40),
+    heroName: sanitizeText(guild.heroName, "Hero", 40),
+    activeRaid: normalizedActiveRaid,
+    raidHistory,
+  };
 };
 
 const RAID_BOSSES = [
@@ -27,7 +120,7 @@ export const createDefaultGuildState = (heroName = "Hero"): GuildState => {
     guildId: `guild-${seed}`,
     guildName: "Starter Guild",
     heroId: "hero-1",
-    heroName,
+    heroName: sanitizeText(heroName, "Hero", 40),
     activeRaid: null,
     raidHistory: [],
   };
@@ -39,25 +132,7 @@ export const loadGuildState = async (): Promise<GuildState | null> => {
     if (!rawValue) {
       return null;
     }
-    const parsed = JSON.parse(rawValue) as Partial<GuildState>;
-    if (
-      !parsed ||
-      typeof parsed !== "object" ||
-      typeof parsed.guildId !== "string" ||
-      typeof parsed.guildName !== "string" ||
-      typeof parsed.heroId !== "string" ||
-      typeof parsed.heroName !== "string"
-    ) {
-      return null;
-    }
-    return {
-      guildId: parsed.guildId,
-      guildName: parsed.guildName,
-      heroId: parsed.heroId,
-      heroName: parsed.heroName,
-      activeRaid: parsed.activeRaid ?? null,
-      raidHistory: Array.isArray(parsed.raidHistory) ? parsed.raidHistory : [],
-    };
+    return normalizeGuildState(JSON.parse(rawValue));
   } catch {
     return null;
   }
@@ -73,7 +148,7 @@ export const saveGuildState = async (guild: GuildState): Promise<void> => {
 
 export const renameGuild = (guild: GuildState, guildName: string): GuildState => ({
   ...guild,
-  guildName: guildName.trim() || guild.guildName,
+  guildName: sanitizeText(guildName, guild.guildName, 50),
 });
 
 export const startRaid = (guild: GuildState): GuildState => {
@@ -122,13 +197,13 @@ export const applyRaidDamage = (guild: GuildState, damage: number): GuildState =
         damage: actualDamage,
         at: Date.now(),
       },
-    ],
+    ].slice(-MAX_CONTRIBUTIONS_PER_RAID),
   };
 
   return {
     ...guild,
     activeRaid: completed ? null : updatedRaid,
-    raidHistory: completed ? [updatedRaid, ...guild.raidHistory].slice(0, 15) : guild.raidHistory,
+    raidHistory: completed ? [updatedRaid, ...guild.raidHistory].slice(0, MAX_RAID_HISTORY) : guild.raidHistory,
   };
 };
 
