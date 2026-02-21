@@ -1,5 +1,6 @@
 import { StatusBar } from "expo-status-bar";
 import * as ImagePicker from "expo-image-picker";
+import { useEffect, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
@@ -8,6 +9,7 @@ import {
   ScrollView,
   StyleSheet,
   Text,
+  TextInput,
   View,
 } from "react-native";
 import { DialogueBox } from "./src/components/DialogueBox";
@@ -16,7 +18,7 @@ import { QuestCard } from "./src/components/QuestCard";
 import { StatPill } from "./src/components/StatPill";
 import { useGameState } from "./src/hooks/useGameState";
 import { colors } from "./src/theme/colors";
-import { AttributeKey } from "./src/types/game";
+import { AttributeKey, HeroClass } from "./src/types/game";
 
 type SourceMode = "camera" | "library";
 type CaptureTarget = "before" | "after";
@@ -28,18 +30,26 @@ const ATTRIBUTE_LABELS: Record<AttributeKey, string> = {
   willpower: "Willpower",
 };
 
+const HERO_CLASSES: HeroClass[] = ["Cleaner", "Organizer", "Chef"];
+
 export default function App(): JSX.Element {
   const {
     ready,
     player,
+    guild,
+    guildDamageTotal,
     xpToNextLevel,
     dialogue,
+    visionMode,
     busyLabel,
-    beforeImageUri,
-    afterImageUri,
+    beforeImage,
+    afterImage,
     scanResult,
     activeQuest,
     verificationResult,
+    setHeroClass,
+    startGuildRaid,
+    renameGuildName,
     setBeforeImage,
     setAfterImage,
     analyzeScene,
@@ -49,6 +59,11 @@ export default function App(): JSX.Element {
   } = useGameState();
 
   const isBusy = Boolean(busyLabel);
+  const [guildNameDraft, setGuildNameDraft] = useState(guild.guildName);
+
+  useEffect(() => {
+    setGuildNameDraft(guild.guildName);
+  }, [guild.guildName]);
 
   const handleImageInput = async (source: SourceMode, target: CaptureTarget): Promise<void> => {
     if (isBusy) {
@@ -70,24 +85,36 @@ export default function App(): JSX.Element {
         ? await ImagePicker.launchCameraAsync({
             quality: 0.7,
             allowsEditing: true,
+            base64: true,
             mediaTypes: ImagePicker.MediaTypeOptions.Images,
           })
         : await ImagePicker.launchImageLibraryAsync({
             quality: 0.7,
             allowsEditing: true,
+            base64: true,
             mediaTypes: ImagePicker.MediaTypeOptions.Images,
           });
 
-    if (result.canceled || !result.assets[0]?.uri) {
+    const asset = result.canceled ? undefined : result.assets[0];
+    if (result.canceled || !asset?.uri || !asset.base64) {
+      if (!result.canceled) {
+        Alert.alert("Image error", "Could not read image data. Please try another photo.");
+      }
       return;
     }
+
+    const capturedImage = {
+      uri: asset.uri,
+      base64: asset.base64,
+      mimeType: asset.mimeType ?? "image/jpeg",
+    };
 
     if (target === "before") {
-      setBeforeImage(result.assets[0].uri);
+      setBeforeImage(capturedImage);
       return;
     }
 
-    setAfterImage(result.assets[0].uri);
+    setAfterImage(capturedImage);
   };
 
   return (
@@ -108,6 +135,31 @@ export default function App(): JSX.Element {
             <StatPill label="Gold" value={`${player.gold}`} />
           </View>
           <Text style={styles.nextLevelText}>XP to next level: {xpToNextLevel}</Text>
+          <Text style={styles.nextLevelText}>
+            Vision mode:{" "}
+            {visionMode === "cerebras"
+              ? "Cerebras AI"
+              : visionMode === "mock"
+                ? "Fallback (mock)"
+                : "Not scanned yet"}
+          </Text>
+          <Text style={styles.nextLevelText}>Class: {player.className}</Text>
+          <Text style={styles.nextLevelText}>Story chapter: {player.chapter}</Text>
+          <Text style={styles.nextLevelText}>Quests completed: {player.questsCompleted}</Text>
+          <View style={styles.buttonRow}>
+            {HERO_CLASSES.map((className) => (
+              <PrimaryButton
+                key={className}
+                label={className}
+                onPress={() => {
+                  setHeroClass(className);
+                }}
+                variant={player.className === className ? "solid" : "muted"}
+                style={styles.halfButton}
+                disabled={isBusy}
+              />
+            ))}
+          </View>
           <View style={styles.attributesGrid}>
             {(Object.keys(player.attributes) as AttributeKey[]).map((key) => (
               <View style={styles.attributeChip} key={key}>
@@ -136,7 +188,7 @@ export default function App(): JSX.Element {
 
         <View style={styles.sectionCard}>
           <Text style={styles.sectionTitle}>Spirit Lens</Text>
-          {!beforeImageUri ? (
+          {!beforeImage ? (
             <View style={styles.block}>
               <Text style={styles.blockText}>
                 Capture a room photo to spawn quests from real-world chaos.
@@ -164,7 +216,7 @@ export default function App(): JSX.Element {
           ) : (
             <View style={styles.block}>
               <Text style={styles.blockLabel}>Before</Text>
-              <Image source={{ uri: beforeImageUri }} style={styles.previewImage} />
+              <Image source={{ uri: beforeImage.uri }} style={styles.previewImage} />
               {!scanResult && !activeQuest ? (
                 <View style={styles.buttonColumn}>
                   <PrimaryButton
@@ -219,8 +271,8 @@ export default function App(): JSX.Element {
 
             <View style={styles.block}>
               <Text style={styles.blockLabel}>After</Text>
-              {afterImageUri ? (
-                <Image source={{ uri: afterImageUri }} style={styles.previewImage} />
+              {afterImage ? (
+                <Image source={{ uri: afterImage.uri }} style={styles.previewImage} />
               ) : (
                 <View style={styles.afterPlaceholder}>
                   <Text style={styles.placeholderText}>Capture a clean-room proof shot.</Text>
@@ -250,7 +302,7 @@ export default function App(): JSX.Element {
                 onPress={() => {
                   void submitQuest();
                 }}
-                disabled={isBusy || !afterImageUri}
+                disabled={isBusy || !afterImage}
               />
               <PrimaryButton
                 label="Abort Quest"
@@ -277,10 +329,73 @@ export default function App(): JSX.Element {
         ) : null}
 
         <View style={styles.sectionCard}>
-          <Text style={styles.sectionTitle}>Guilds (Next Slice)</Text>
-          <Text style={styles.blockText}>
-            Raid creation, household invites, and contribution tracking are scoped for the next MVP milestone.
-          </Text>
+          <Text style={styles.sectionTitle}>Guild Command</Text>
+          <Text style={styles.blockText}>Guild: {guild.guildName}</Text>
+          <Text style={styles.blockText}>Hero raid damage: {guildDamageTotal}</Text>
+          <View style={styles.buttonRow}>
+            <TextInput
+              value={guildNameDraft}
+              onChangeText={setGuildNameDraft}
+              placeholder="Guild name"
+              placeholderTextColor={colors.textSecondary}
+              style={styles.guildInput}
+            />
+            <PrimaryButton
+              label="Save"
+              onPress={() => {
+                renameGuildName(guildNameDraft);
+              }}
+              variant="muted"
+              style={styles.guildSaveButton}
+              disabled={isBusy}
+            />
+          </View>
+          {guild.activeRaid ? (
+            <View style={styles.raidCard}>
+              <Text style={styles.blockLabel}>Active Raid</Text>
+              <Text style={styles.raidTitle}>{guild.activeRaid.title}</Text>
+              <Text style={styles.blockText}>
+                Boss HP: {guild.activeRaid.currentHp} / {guild.activeRaid.maxHp}
+              </Text>
+              <View style={styles.raidHpTrack}>
+                <View
+                  style={[
+                    styles.raidHpFill,
+                    {
+                      width: `${Math.max(
+                        Math.round((guild.activeRaid.currentHp / guild.activeRaid.maxHp) * 100),
+                        0,
+                      )}%`,
+                    },
+                  ]}
+                />
+              </View>
+              <Text style={styles.blockText}>
+                Contributions: {guild.activeRaid.contributions.length}
+              </Text>
+            </View>
+          ) : (
+            <View style={styles.buttonColumn}>
+              <Text style={styles.blockText}>
+                No active raid. Start one and each completed quest will deal boss damage.
+              </Text>
+              <PrimaryButton
+                label="Start Guild Raid"
+                onPress={startGuildRaid}
+                disabled={isBusy}
+              />
+            </View>
+          )}
+          {guild.raidHistory.length > 0 ? (
+            <View style={styles.block}>
+              <Text style={styles.blockLabel}>Recent Victories</Text>
+              {guild.raidHistory.slice(0, 3).map((raid) => (
+                <Text key={raid.id} style={styles.blockText}>
+                  {raid.bossName} defeated ({raid.contributions.length} hits)
+                </Text>
+              ))}
+            </View>
+          ) : null}
         </View>
       </ScrollView>
     </SafeAreaView>
@@ -423,6 +538,20 @@ const styles = StyleSheet.create({
   halfButton: {
     flex: 1,
   },
+  guildInput: {
+    flex: 1,
+    backgroundColor: colors.bgSoft,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: colors.border,
+    color: colors.textPrimary,
+    paddingHorizontal: 10,
+    paddingVertical: 10,
+    fontWeight: "600",
+  },
+  guildSaveButton: {
+    width: 84,
+  },
   questList: {
     gap: 10,
   },
@@ -463,5 +592,29 @@ const styles = StyleSheet.create({
   verificationMeta: {
     color: colors.textSecondary,
     fontSize: 12,
+  },
+  raidCard: {
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.bgSoft,
+    padding: 10,
+    gap: 6,
+  },
+  raidTitle: {
+    color: colors.textPrimary,
+    fontSize: 15,
+    fontWeight: "800",
+  },
+  raidHpTrack: {
+    width: "100%",
+    height: 10,
+    borderRadius: 999,
+    backgroundColor: colors.bgElevated,
+    overflow: "hidden",
+  },
+  raidHpFill: {
+    height: "100%",
+    backgroundColor: colors.accentStrong,
   },
 });

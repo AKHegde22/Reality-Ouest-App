@@ -25,6 +25,7 @@ export const QuestCard = ({
     <View style={styles.metaRow}>
       <Text style={styles.meta}>~{quest.estimateMinutes} min</Text>
       <Text style={styles.meta}>+{quest.xpReward} XP</Text>
+      <Text style={styles.meta}>{quest.discipline}</Text>
       <Text style={styles.meta}>
         +{quest.attributeDelta} {quest.attributeReward}
       </Text>

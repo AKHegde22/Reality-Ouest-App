@@ -1,25 +1,36 @@
-# Reality RPG MVP (Vertical Slice)
+# Reality RPG (App + Real AI Backend)
 
-This repository now includes an initial Expo React Native MVP that implements the first gameplay loop:
+This repository now includes:
 
-1. Capture/select a "before" room photo.
-2. Run a mocked Spirit Lens scan to generate quest cards.
-3. Accept a quest, capture/select an "after" photo, and verify completion.
-4. Gain XP, level up, and persist player progression locally.
+1. An Expo React Native app for the core gameplay loop.
+2. A Node backend (`server/index.mjs`) that calls Cerebras chat-completions with strict JSON schema outputs.
+3. A local fallback path when cloud vision is unavailable.
 
-## Quick Start
+## Setup
+
+1. Copy `.env.example` to `.env`.
+2. Set `CEREBRAS_API_KEY` in `.env`.
+3. Set `EXPO_PUBLIC_REALITY_API_BASE_URL` in `.env`:
+   - iOS simulator: `http://localhost:8787`
+   - Android emulator: `http://10.0.2.2:8787`
+
+The API server auto-loads variables from `.env` on startup.
+
+## Run
 
 ```bash
 npm install
+npm run server:start
 npm run start
 ```
 
-## Current Scope
+## Current Build Scope
 
-*   Mobile UI shell with narrative dialogue + player stats.
-*   Mock AI vision service for quest generation and before/after verification.
-*   RPG progression (XP, levels, attributes, gold) with local persistence.
-*   Guild and social raid systems marked as next milestone.
+*   Real API-backed scan (`/api/v1/scan`) and verification (`/api/v1/verify`) endpoints.
+*   Mobile client captures base64 images and calls backend with timeout + fallback.
+*   RPG progression with class XP bonuses, chapter unlocks, levels, attributes, and gold.
+*   Local guild raid loop (create raid, deal damage on completed quests, raid history persistence).
+*   Cerebras integration currently uses image fingerprints + structured LLM reasoning (raw multimodal image input is not used).
 
 ---
 

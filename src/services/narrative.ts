@@ -44,3 +44,20 @@ export const levelUpLine = (newLevel: number): string =>
     `Hero rank up: Level ${newLevel}. Keep the streak alive.`,
     `Level ${newLevel} unlocked. New story chapter potential increased.`,
   ]);
+
+export const classBonusLine = (classBonusMultiplier: number): string => {
+  if (classBonusMultiplier <= 1) {
+    return "";
+  }
+  return `Class synergy bonus active: +${Math.round((classBonusMultiplier - 1) * 100)}% XP.`;
+};
+
+export const chapterUnlockedLine = (chapter: number): string =>
+  pickLine(`chapter:${chapter}`, [
+    `Chapter ${chapter} unlocked. Your hub story evolves.`,
+    `Story milestone reached: Chapter ${chapter}.`,
+    `New narrative chapter available: Chapter ${chapter}.`,
+  ]);
+
+export const raidDamageLine = (damage: number, raidBossName: string): string =>
+  `${raidBossName} took ${damage} raid damage from your cleanup combo.`;

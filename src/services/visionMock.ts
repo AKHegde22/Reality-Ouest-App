@@ -1,5 +1,5 @@
 import { QUEST_CATALOG } from "../data/questCatalog";
-import { Quest, QuestTemplate, ScanResult, VerificationResult } from "../types/game";
+import { CapturedImage, Quest, QuestTemplate, ScanResult, VerificationResult } from "../types/game";
 
 const wait = (ms: number): Promise<void> =>
   new Promise((resolve) => {
@@ -44,6 +44,7 @@ const toQuest = (template: QuestTemplate, seed: number, index: number): Quest =>
     monsterName: template.monsterName,
     estimateMinutes: template.estimateMinutes + ((seed + index) % 6),
     xpReward: template.xpBase + xpBonus,
+    discipline: template.discipline,
     attributeReward: template.attributeReward,
     attributeDelta,
     flavor: template.flavor,
@@ -54,11 +55,11 @@ const toQuest = (template: QuestTemplate, seed: number, index: number): Quest =>
 const buildNarration = (quest: Quest): string =>
   `Spirit Lens lock acquired. ${quest.monsterName} identified. Suggested counter-quest: ${quest.title}.`;
 
-export const analyzeBeforeImage = async (beforeImageUri: string): Promise<ScanResult> => {
+export const analyzeBeforeImage = async (beforeImage: CapturedImage): Promise<ScanResult> => {
   await wait(950);
 
-  const seed = hashString(beforeImageUri);
-  const tags = inferTags(beforeImageUri);
+  const seed = hashString(beforeImage.uri);
+  const tags = inferTags(beforeImage.uri);
   const matched = QUEST_CATALOG.filter((template) =>
     template.tags.some((tag) => tags.includes(tag)),
   );
@@ -77,29 +78,31 @@ export const analyzeBeforeImage = async (beforeImageUri: string): Promise<ScanRe
   return {
     narration: primaryQuest ? buildNarration(primaryQuest) : "No hostile mess signatures found.",
     quests,
+    source: "mock",
   };
 };
 
 export const verifyAfterImage = async ({
-  beforeImageUri,
-  afterImageUri,
+  beforeImage,
+  afterImage,
   quest,
 }: {
-  beforeImageUri: string;
-  afterImageUri: string;
+  beforeImage: CapturedImage;
+  afterImage: CapturedImage;
   quest: Quest;
 }): Promise<VerificationResult> => {
   await wait(1000);
 
-  if (beforeImageUri === afterImageUri) {
+  if (beforeImage.base64 === afterImage.base64) {
     return {
       success: false,
       confidence: 0.16,
       message: "Verification failed: after photo matches the before photo.",
+      source: "mock",
     };
   }
 
-  const score = hashString(`${beforeImageUri}|${afterImageUri}|${quest.id}`) % 100;
+  const score = hashString(`${beforeImage.uri}|${afterImage.uri}|${quest.id}`) % 100;
   const success = score >= 24;
 
   return {
@@ -108,5 +111,6 @@ export const verifyAfterImage = async ({
     message: success
       ? `${quest.monsterName} dispelled. Room corruption reduced.`
       : "The room signature changed only slightly. Try a clearer after photo.",
+    source: "mock",
   };
 };
